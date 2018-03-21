@@ -1,12 +1,12 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
-	"net/http/httputil"
 
 	"github.com/kelseyhightower/envconfig"
 	"github.com/sirupsen/logrus"
+
+	"github.com/campoy/goodgopher/goodgopher"
 )
 
 func main() {
@@ -15,15 +15,13 @@ func main() {
 		Port string `default:"8080"`
 	}
 	envconfig.MustProcess("", &config)
-
-	http.HandleFunc("/", handler)
 	addr := config.IP + ":" + config.Port
 	logrus.Infof("listening on %s", addr)
-	logrus.Fatal(http.ListenAndServe(addr, nil))
-}
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "hello")
-	b, _ := httputil.DumpRequest(r, true)
-	logrus.Debugf("request: %s", b)
+	h, err := goodgopher.New()
+	if err != nil {
+		logrus.Fatalf("could not create handler: %v", err)
+	}
+
+	logrus.Fatal(http.ListenAndServe(addr, h))
 }
