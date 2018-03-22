@@ -25,6 +25,7 @@ func main() {
 
 	if config.Verbose {
 		logrus.SetLevel(logrus.DebugLevel)
+		logrus.Debugf("logging set to debug level")
 	}
 
 	key, err := ioutil.ReadFile(config.KeyPath)

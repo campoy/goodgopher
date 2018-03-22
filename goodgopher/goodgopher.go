@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/bradleyfalzon/ghinstallation"
 	"github.com/google/go-github/github"
 	"github.com/sirupsen/logrus"
+	"gopkg.in/src-d/go-billy.v4/osfs"
 	git "gopkg.in/src-d/go-git.v4"
+	"gopkg.in/src-d/go-git.v4/config"
+	"gopkg.in/src-d/go-git.v4/storage/filesystem"
 )
 
 type server struct {
@@ -27,7 +31,9 @@ func New(appID int, key []byte) (http.Handler, error) {
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch kind := r.Header.Get("X-Github-Event"); kind {
+	kind := r.Header.Get("X-Github-Event")
+	logrus.Debugf("received hook of kind %s", kind)
+	switch kind {
 	case "pull_request":
 		var data github.PullRequestEvent
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
@@ -56,13 +62,31 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func processPullRequest(ctx context.Context, client *github.Client, pr *github.PullRequestEvent) error {
 	var (
-		owner  = pr.Repo.GetOwner().GetLogin()
-		repo   = pr.Repo.GetName()
-		number = pr.GetNumber()
+		owner    = pr.Repo.GetOwner().GetLogin()
+		repoName = pr.Repo.GetName()
+		number   = pr.GetNumber()
 	)
 
-	git.PlainClone("/tmp/foo", true, &git.CloneOptions{})
-	commits, _, err := client.PullRequests.ListCommits(ctx, owner, repo, pr.GetNumber(), nil)
+	fs := osfs.New(os.TempDir())
+	storage, err := filesystem.NewStorage(fs)
+	if err != nil {
+		return fmt.Errorf("could not create storage: %v", err)
+	}
+	repo, err := git.Clone(storage, fs, &git.CloneOptions{
+		URL: pr.Repo.GetURL(),
+	})
+	logrus.Infof("cloned %s", pr.Repo.GetURL())
+	if err != nil {
+		return fmt.Errorf("could not open repo: %v", err)
+	}
+	if err := repo.Fetch(&git.FetchOptions{
+		RefSpecs: []config.RefSpec{},
+	}); err != nil {
+		return fmt.Errorf("could not fetch: %v", err)
+	}
+
+	// git.PlainClone("/tmp/foo", true, &git.CloneOptions{URL: pr.Repo.GetURL()})
+	commits, _, err := client.PullRequests.ListCommits(ctx, owner, repoName, pr.GetNumber(), nil)
 	if err != nil {
 		return fmt.Errorf("could not fetch commits: %v", err)
 	}
@@ -76,7 +100,7 @@ func processPullRequest(ctx context.Context, client *github.Client, pr *github.P
 		CommitID: commits[len(commits)-1].SHA,
 		Position: &pos,
 	}
-	_, _, err = client.PullRequests.CreateComment(ctx, owner, repo, number, comment)
+	_, _, err = client.PullRequests.CreateComment(ctx, owner, repoName, number, comment)
 	return err
 
 	// commitsURL := strings.Replace(pr.PullRequest.GetCommitsURL(), "{/sha}", "", -1)
@@ -91,7 +115,7 @@ func processPullRequest(ctx context.Context, client *github.Client, pr *github.P
 	// 		return fmt.Errorf("could not process commit %d: %v", commit.SHA, err)
 	// 	}
 	// }
-	return nil
+	// return nil
 }
 
 func processCommit(ctx context.Context, url string) error {
