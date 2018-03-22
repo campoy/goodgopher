@@ -20,6 +20,7 @@ import (
 	"github.com/google/go-github/github"
 	"github.com/sirupsen/logrus"
 	git "gopkg.in/src-d/go-git.v4"
+	"gopkg.in/src-d/go-git.v4/plumbing"
 )
 
 type server struct {
@@ -68,31 +69,39 @@ type comment struct {
 	message string
 }
 
-func processRepo(repo string) ([]comment, error) {
+func processRepo(repo, ref string) ([]comment, error) {
+	logrus.Infof("processing %s:%s", repo, ref)
 	dir, err := ioutil.TempDir("", "")
 	if err != nil {
 		return nil, fmt.Errorf("could not create temp dir: %v", err)
 	}
-	defer os.RemoveAll(dir)
+	// defer os.RemoveAll(dir)
 
-	r := runner{gopath: dir, path: repo}
-	repoPath := filepath.Join(dir, "src", repo)
+	importPath := strings.TrimSuffix(strings.TrimPrefix(repo, "git://"), ".git")
 
-	logrus.Infof("cloning %s", repo)
-	_, err = git.PlainClone(repoPath, false,
-		&git.CloneOptions{URL: "https://" + repo})
+	r := runner{gopath: dir, path: importPath}
+	absPath := filepath.Join(dir, "src", importPath)
+	os.MkdirAll(absPath, os.ModePerm)
+
+	opts := &git.CloneOptions{
+		URL:           repo,
+		ReferenceName: plumbing.ReferenceName(fmt.Sprintf("refs/heads/%s", ref)),
+		SingleBranch:  true,
+	}
+	logrus.Infof("git clone %s -b %s", opts.URL, opts.ReferenceName)
+	_, err = git.PlainClone(absPath, false, opts)
 	if err != nil {
-		return nil, fmt.Errorf("could not clone: %v", err)
+		return nil, fmt.Errorf("could not clone repo: %v", err)
 	}
 
 	logrus.Info("fetching dependencies")
-	_, err = r.run("go", "get", ".")
+	out, err := r.run("go", "get", ".")
 	if err != nil {
-		return nil, fmt.Errorf("could not fetch dependencies: %v", err)
+		return nil, fmt.Errorf("could not fetch dependencies: %v\n%s", err, out)
 	}
 
 	logrus.Info("vetting code")
-	out, err := r.run("megacheck", "./...")
+	out, err = r.run("megacheck", "./...")
 	if err == nil {
 		return nil, nil
 	}
@@ -106,7 +115,7 @@ func processRepo(repo string) ([]comment, error) {
 			logrus.Errorf("unparsable line %s", s.Text())
 		}
 		path, line, _, msg := ps[0], ps[1], ps[2], ps[3]
-		path = strings.TrimPrefix(path, repoPath+"/")
+		path = strings.TrimPrefix(path, absPath+"/")
 		lineNumber, err := strconv.Atoi(line)
 		if err != nil {
 			logrus.Errorf("bad line number: %v", err)
@@ -159,7 +168,7 @@ func processPullRequest(ctx context.Context, client *github.Client, pr *github.P
 	// 	return fmt.Errorf("could not fetch commits: %v", err)
 	// }
 
-	comments, err := processRepo(pr.Repo.GetURL())
+	comments, err := processRepo(pr.PullRequest.Head.Repo.GetGitURL(), pr.PullRequest.Head.GetRef())
 	if err != nil {
 		return fmt.Errorf("could not process repo: %v", err)
 	}
