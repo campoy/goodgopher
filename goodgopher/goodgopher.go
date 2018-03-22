@@ -1,23 +1,25 @@
 package goodgopher
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/bradleyfalzon/ghinstallation"
 	"github.com/google/go-github/github"
 	"github.com/sirupsen/logrus"
-	"gopkg.in/src-d/go-billy.v4/osfs"
 	git "gopkg.in/src-d/go-git.v4"
-	"gopkg.in/src-d/go-git.v4/config"
-	"gopkg.in/src-d/go-git.v4/storage/filesystem"
 )
 
 type server struct {
@@ -60,6 +62,72 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type comment struct {
+	path    string
+	line    int
+	message string
+}
+
+func processRepo(repo string) ([]comment, error) {
+	dir, err := ioutil.TempDir("", "")
+	if err != nil {
+		return nil, fmt.Errorf("could not create temp dir: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	r := runner{gopath: dir, path: repo}
+	repoPath := filepath.Join(dir, "src", repo)
+
+	logrus.Infof("cloning %s", repo)
+	_, err = git.PlainClone(repoPath, false,
+		&git.CloneOptions{URL: "https://" + repo})
+	if err != nil {
+		return nil, fmt.Errorf("could not clone: %v", err)
+	}
+
+	logrus.Info("fetching dependencies")
+	_, err = r.run("go", "get", ".")
+	if err != nil {
+		return nil, fmt.Errorf("could not fetch dependencies: %v", err)
+	}
+
+	logrus.Info("vetting code")
+	out, err := r.run("megacheck", "./...")
+	if err == nil {
+		return nil, nil
+	}
+
+	var comments []comment
+
+	s := bufio.NewScanner(bytes.NewReader(out))
+	for s.Scan() {
+		ps := strings.SplitN(s.Text(), ":", 4)
+		if len(ps) != 4 {
+			logrus.Errorf("unparsable line %s", s.Text())
+		}
+		path, line, _, msg := ps[0], ps[1], ps[2], ps[3]
+		path = strings.TrimPrefix(path, repoPath+"/")
+		lineNumber, err := strconv.Atoi(line)
+		if err != nil {
+			logrus.Errorf("bad line number: %v", err)
+		}
+		comments = append(comments, comment{path, lineNumber, msg})
+	}
+	if err := s.Err(); err != nil {
+		return nil, fmt.Errorf("could not parse output: %v", err)
+	}
+	return comments, nil
+}
+
+type runner struct{ gopath, path string }
+
+func (r runner) run(bin string, args ...string) ([]byte, error) {
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = filepath.Join(r.gopath, "src", r.path)
+	cmd.Env = append(os.Environ(), "GOPATH="+r.gopath)
+	return cmd.CombinedOutput()
+}
+
 func processPullRequest(ctx context.Context, client *github.Client, pr *github.PullRequestEvent) error {
 	var (
 		owner    = pr.Repo.GetOwner().GetLogin()
@@ -67,41 +135,48 @@ func processPullRequest(ctx context.Context, client *github.Client, pr *github.P
 		number   = pr.GetNumber()
 	)
 
-	fs := osfs.New(os.TempDir())
-	storage, err := filesystem.NewStorage(fs)
+	// fs := osfs.New(os.TempDir())
+	// storage, err := filesystem.NewStorage(fs)
+	// if err != nil {
+	// 	return fmt.Errorf("could not create storage: %v", err)
+	// }
+	// repo, err := git.Clone(storage, fs, &git.CloneOptions{
+	// 	URL: pr.Repo.GetURL(),
+	// })
+	// logrus.Infof("cloned %s", pr.Repo.GetURL())
+	// if err != nil {
+	// 	return fmt.Errorf("could not open repo: %v", err)
+	// }
+	// if err := repo.Fetch(&git.FetchOptions{
+	// 	RefSpecs: []config.RefSpec{},
+	// }); err != nil {
+	// 	return fmt.Errorf("could not fetch: %v", err)
+	// }
+
+	// // git.PlainClone("/tmp/foo", true, &git.CloneOptions{URL: pr.Repo.GetURL()})
+	// commits, _, err := client.PullRequests.ListCommits(ctx, owner, repoName, pr.GetNumber(), nil)
+	// if err != nil {
+	// 	return fmt.Errorf("could not fetch commits: %v", err)
+	// }
+
+	comments, err := processRepo(pr.Repo.GetURL())
 	if err != nil {
-		return fmt.Errorf("could not create storage: %v", err)
-	}
-	repo, err := git.Clone(storage, fs, &git.CloneOptions{
-		URL: pr.Repo.GetURL(),
-	})
-	logrus.Infof("cloned %s", pr.Repo.GetURL())
-	if err != nil {
-		return fmt.Errorf("could not open repo: %v", err)
-	}
-	if err := repo.Fetch(&git.FetchOptions{
-		RefSpecs: []config.RefSpec{},
-	}); err != nil {
-		return fmt.Errorf("could not fetch: %v", err)
+		return fmt.Errorf("could not process repo: %v", err)
 	}
 
-	// git.PlainClone("/tmp/foo", true, &git.CloneOptions{URL: pr.Repo.GetURL()})
-	commits, _, err := client.PullRequests.ListCommits(ctx, owner, repoName, pr.GetNumber(), nil)
-	if err != nil {
-		return fmt.Errorf("could not fetch commits: %v", err)
+	for _, comment := range comments {
+		comment := &github.PullRequestComment{
+			Body: &comment.message,
+			Path: &comment.path,
+			// CommitID: commits[len(commits)-1].SHA,
+			Position: &comment.line,
+		}
+		_, _, err = client.PullRequests.CreateComment(ctx, owner, repoName, number, comment)
+		if err != nil {
+			return fmt.Errorf("could not comment on repo: %v", err)
+		}
 	}
-
-	body := "hello 👋"
-	path := "main.go"
-	pos := 1
-	comment := &github.PullRequestComment{
-		Body:     &body,
-		Path:     &path,
-		CommitID: commits[len(commits)-1].SHA,
-		Position: &pos,
-	}
-	_, _, err = client.PullRequests.CreateComment(ctx, owner, repoName, number, comment)
-	return err
+	return nil
 
 	// commitsURL := strings.Replace(pr.PullRequest.GetCommitsURL(), "{/sha}", "", -1)
 	// logrus.Debugf("fetching commits from %s", commitsURL)
