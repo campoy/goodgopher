@@ -13,6 +13,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation"
 	"github.com/google/go-github/github"
 	"github.com/sirupsen/logrus"
+	git "gopkg.in/src-d/go-git.v4"
 )
 
 type server struct {
@@ -48,8 +49,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			logrus.Error(err)
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
-	default:
-		http.Error(w, "unkown kind "+kind, http.StatusBadRequest)
+		// default:
+		// 	http.Error(w, "unkown kind "+kind, http.StatusBadRequest)
 	}
 }
 
@@ -60,6 +61,7 @@ func processPullRequest(ctx context.Context, client *github.Client, pr *github.P
 		number = pr.GetNumber()
 	)
 
+	git.PlainClone("/tmp/foo", true, &git.CloneOptions{})
 	commits, _, err := client.PullRequests.ListCommits(ctx, owner, repo, pr.GetNumber(), nil)
 	if err != nil {
 		return fmt.Errorf("could not fetch commits: %v", err)
