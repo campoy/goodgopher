@@ -75,7 +75,8 @@ func processRepo(repo, ref string) ([]comment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not create temp dir: %v", err)
 	}
-	// defer os.RemoveAll(dir)
+	logrus.Debugf("temp dir: %s", dir)
+	defer os.RemoveAll(dir)
 
 	importPath := strings.TrimSuffix(strings.TrimPrefix(repo, "git://"), ".git")
 
@@ -89,7 +90,7 @@ func processRepo(repo, ref string) ([]comment, error) {
 		SingleBranch:  true,
 	}
 	logrus.Infof("git clone %s -b %s", opts.URL, opts.ReferenceName)
-	_, err = git.PlainClone(absPath, false, opts)
+	repo, err = git.PlainClone(absPath, false, opts)
 	if err != nil {
 		return nil, fmt.Errorf("could not clone repo: %v", err)
 	}
@@ -102,6 +103,7 @@ func processRepo(repo, ref string) ([]comment, error) {
 
 	logrus.Info("vetting code")
 	out, err = r.run("megacheck", "./...")
+	logrus.Debugf("megacheck output:\n%s", out)
 	if err == nil {
 		return nil, nil
 	}
@@ -110,6 +112,7 @@ func processRepo(repo, ref string) ([]comment, error) {
 
 	s := bufio.NewScanner(bytes.NewReader(out))
 	for s.Scan() {
+		logrus.Infof("processing line: %s", s.Text())
 		ps := strings.SplitN(s.Text(), ":", 4)
 		if len(ps) != 4 {
 			logrus.Errorf("unparsable line %s", s.Text())
@@ -122,6 +125,7 @@ func processRepo(repo, ref string) ([]comment, error) {
 		}
 		comments = append(comments, comment{path, lineNumber, msg})
 	}
+	logrus.Infof("done vetting code")
 	if err := s.Err(); err != nil {
 		return nil, fmt.Errorf("could not parse output: %v", err)
 	}
@@ -144,34 +148,11 @@ func processPullRequest(ctx context.Context, client *github.Client, pr *github.P
 		number   = pr.GetNumber()
 	)
 
-	// fs := osfs.New(os.TempDir())
-	// storage, err := filesystem.NewStorage(fs)
-	// if err != nil {
-	// 	return fmt.Errorf("could not create storage: %v", err)
-	// }
-	// repo, err := git.Clone(storage, fs, &git.CloneOptions{
-	// 	URL: pr.Repo.GetURL(),
-	// })
-	// logrus.Infof("cloned %s", pr.Repo.GetURL())
-	// if err != nil {
-	// 	return fmt.Errorf("could not open repo: %v", err)
-	// }
-	// if err := repo.Fetch(&git.FetchOptions{
-	// 	RefSpecs: []config.RefSpec{},
-	// }); err != nil {
-	// 	return fmt.Errorf("could not fetch: %v", err)
-	// }
-
-	// // git.PlainClone("/tmp/foo", true, &git.CloneOptions{URL: pr.Repo.GetURL()})
-	// commits, _, err := client.PullRequests.ListCommits(ctx, owner, repoName, pr.GetNumber(), nil)
-	// if err != nil {
-	// 	return fmt.Errorf("could not fetch commits: %v", err)
-	// }
-
 	comments, err := processRepo(pr.PullRequest.Head.Repo.GetGitURL(), pr.PullRequest.Head.GetRef())
 	if err != nil {
 		return fmt.Errorf("could not process repo: %v", err)
 	}
+	logrus.Debugf("got %d comments, sending them now", len(comments))
 
 	for _, comment := range comments {
 		comment := &github.PullRequestComment{
