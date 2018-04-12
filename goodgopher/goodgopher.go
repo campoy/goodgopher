@@ -175,9 +175,9 @@ func processPullRequest(ctx context.Context, client *github.Client, pr *github.P
 
 	for _, comment := range comments {
 		comment := &github.PullRequestComment{
-			Body: &comment.message,
-			Path: &comment.path,
-			// CommitID: commits[len(commits)-1].SHA,
+			Body:     &comment.message,
+			Path:     &comment.path,
+			CommitID: pr.PullRequest.Head.SHA,
 			Position: &comment.line,
 		}
 		_, _, err = client.PullRequests.CreateComment(ctx, owner, repoName, number, comment)
